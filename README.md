@@ -1,20 +1,24 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# DotBox Multiplayer
 
-# Run and deploy your AI Studio app
+Jogo de pontinhos e caixas (Dots and Boxes) para 2 a 7 jogadores, local ou online.
 
-This contains everything you need to run your app locally.
+- **Cliente:** React + Vite (PWA)
+- **Servidor:** Node + Express + Socket.IO (`server/index.js`). As salas vivem só em memória.
+- O nome do jogador e um token anónimo ficam no `localStorage`. O token permite voltar à mesma sala depois de recarregar a página.
 
-View your app in AI Studio: https://ai.studio/apps/drive/1nMfEnN-PYw58O9bAt9XKbwKQB5tLg1hS
+## Correr localmente
 
-## Run Locally
+```bash
+npm install
+npm run server   # servidor de jogo na porta 3001
+npm run dev      # noutro terminal: cliente em http://localhost:3000
+```
 
-**Prerequisites:**  Node.js
+Para testar como em produção: `npm run build && npm start` e abrir http://localhost:3001.
 
+## Deploy (Render)
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+Um único **Web Service** serve o site e o WebSocket. A configuração está em `render.yaml`:
+- Build: `npm ci --include=dev && npm run build`
+- Start: `npm start`
+- Health check: `/health`

@@ -1,11 +1,36 @@
-
-
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { Player, Line, Box, Match, MatchStatus, Move, ChatMessage } from './types';
+import { Player, Line, Box, RoomState, ChatMessage } from './types';
 import { GRID_SIZE, PLAYERS_INIT, BOX_SIZE, DOT_RADIUS } from './constants';
-import { supabase } from './src/lib/supabase';
+import { socket, request, getPlayerToken } from './src/lib/socket';
 
 type ViewState = 'menu' | 'lobby' | 'game';
+
+const ROOM_KEY = 'dotbox-room-code';
+
+const createLines = (): Line[] => {
+  const result: Line[] = [];
+  for (let r = 0; r < GRID_SIZE; r++) {
+    for (let c = 0; c < GRID_SIZE - 1; c++) {
+      result.push({ id: `h-${r}-${c}`, p1: [r, c], p2: [r, c + 1], ownerId: null, orientation: 'horizontal' });
+    }
+  }
+  for (let r = 0; r < GRID_SIZE - 1; r++) {
+    for (let c = 0; c < GRID_SIZE; c++) {
+      result.push({ id: `v-${r}-${c}`, p1: [r, c], p2: [r + 1, c], ownerId: null, orientation: 'vertical' });
+    }
+  }
+  return result;
+};
+
+const createBoxes = (): Box[] => {
+  const result: Box[] = [];
+  for (let r = 0; r < GRID_SIZE - 1; r++) {
+    for (let c = 0; c < GRID_SIZE - 1; c++) {
+      result.push({ id: `box-${r}-${c}`, row: r, col: c, ownerId: null });
+    }
+  }
+  return result;
+};
 
 const App: React.FC = () => {
   // --- Game State ---
@@ -16,7 +41,6 @@ const App: React.FC = () => {
   const [boxes, setBoxes] = useState<Box[]>([]);
   const [winner, setWinner] = useState<Player | null>(null);
   const [scale, setScale] = useState(1);
-  const boardContainerRef = useRef<HTMLDivElement>(null);
   const playersWithScores = useMemo(() => {
     return players.map(p => ({
       ...p,
@@ -28,16 +52,17 @@ const App: React.FC = () => {
   const [view, setView] = useState<ViewState>('menu');
   const [roomCode, setRoomCode] = useState('');
   const [joinCode, setJoinCode] = useState('');
-  const [matchId, setMatchId] = useState<string | null>(null);
   const [myPlayerId, setMyPlayerId] = useState<number | null>(null); // Local ID in the room (0, 1, 2...)
-  const [isHost, setIsHost] = useState(false);
+  const [hostId, setHostId] = useState<number | null>(null);
   const [isOnline, setIsOnline] = useState(false);
+  const [isConnected, setIsConnected] = useState(socket.connected);
+  const [turnEndsAt, setTurnEndsAt] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
+  const isHost = isOnline && myPlayerId !== null && myPlayerId === hostId;
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('dotbox-theme') as 'light' | 'dark' || 'light';
     }
-    return 'light';
     return 'light';
   });
 
@@ -57,6 +82,8 @@ const App: React.FC = () => {
   const [chatInput, setChatInput] = useState('');
   const [unreadCount, setUnreadCount] = useState(0);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const isChatOpenRef = useRef(isChatOpen);
+  isChatOpenRef.current = isChatOpen;
 
   // --- Start Delay Config ---
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -102,167 +129,116 @@ const App: React.FC = () => {
     setTimeout(() => setShowSnackbar(false), 2000);
   };
 
+  const triggerTimeoutAlert = () => {
+    setShowTimeoutAlert(true);
+    setTimeout(() => setShowTimeoutAlert(false), 2000);
+  };
+
   useEffect(() => {
     localStorage.setItem('dotbox-player-name', playerName);
   }, [playerName]);
 
-  // --- Auth State ---
-  useEffect(() => {
-    const signIn = async () => {
-      const { data, error } = await supabase.auth.getSession();
-      if (!data.session) {
-        await supabase.auth.signInAnonymously();
-      }
-    };
-    signIn();
+  // --- Online: aplica o estado enviado pelo servidor ---
+  const applyRoomState = useCallback((state: RoomState) => {
+    setIsOnline(true);
+    setRoomCode(state.code);
+    setPlayers(state.players);
+    setNumPlayers(state.players.length);
+    setHostId(state.hostId);
+    setCurrentPlayerIdx(state.currentTurn);
+    setStartDelay(state.startDelay);
+    setTurnEndsAt(state.turnEndsAt);
+    setWinner(state.winner);
+    setLines(createLines().map(l => ({ ...l, ownerId: state.lines[l.id] ?? null })));
+    setBoxes(createBoxes().map(b => ({ ...b, ownerId: state.boxes[b.id] ?? null })));
+    setView(state.status === 'waiting' ? 'lobby' : 'game');
   }, []);
 
-  // --- Reconnection Logic ---
+  const enterRoom = useCallback((res: { playerId: number; state: RoomState; chat: ChatMessage[] }) => {
+    setMyPlayerId(res.playerId);
+    setChatMessages(res.chat);
+    applyRoomState(res.state);
+    localStorage.setItem(ROOM_KEY, res.state.code);
+  }, [applyRoomState]);
+
+  // --- Online: ligação ao servidor e eventos ---
   useEffect(() => {
-    const restoreGame = async () => {
-      if (typeof window === 'undefined') return;
-
-      const savedMatchId = localStorage.getItem('dotbox-match-id');
-      if (!savedMatchId) return;
-
-      console.log("Attempting to restore game:", savedMatchId);
-      setLoading(true);
-
+    const onConnect = async () => {
+      setIsConnected(true);
+      // Ao (re)ligar, tenta voltar à sala guardada (recarregar página, queda de rede, etc.)
+      const savedCode = localStorage.getItem(ROOM_KEY);
+      if (!savedCode) return;
       try {
-        let attempts = 0;
-        let userUser = null;
-        while (attempts < 5) {
-          const { data } = await supabase.auth.getSession();
-          if (data.session) {
-            userUser = data.session.user;
-            break;
-          }
-          await new Promise(r => setTimeout(r, 200));
-          attempts++;
-        }
-
-        if (!userUser) {
-          console.log("Restoration failed: No User");
-          return;
-        }
-
-        const { data: match, error } = await supabase
-          .from('matches')
-          .select('*')
-          .eq('id', savedMatchId)
-          .single();
-
-        if (error || !match) {
-          console.log("Restoration failed: Match gone");
-          localStorage.removeItem('dotbox-match-id');
-          return;
-        }
-
-        const myIndex = match.players.findIndex((p: any) => p.auth_id === userUser.id);
-        if (myIndex === -1) {
-          localStorage.removeItem('dotbox-match-id');
-          return;
-        }
-
-        // Use the helper to restore
-        await loadOnlineMatchData(match, myIndex);
-      } catch (e) {
-        console.error("Restoration error", e);
-      } finally {
-        setLoading(false);
+        const res = await request<any>('join', { code: savedCode, token: getPlayerToken(), resumeOnly: true });
+        enterRoom(res);
+      } catch {
+        localStorage.removeItem(ROOM_KEY);
       }
     };
-    restoreGame();
-  }, []);
+    const onDisconnect = () => setIsConnected(false);
+    const onYou = ({ playerId }: { playerId: number }) => setMyPlayerId(playerId);
+    const onTimeout = () => triggerTimeoutAlert();
+    const onChat = (msg: ChatMessage) => {
+      setChatMessages(prev => [...prev, msg]);
+      if (!isChatOpenRef.current) {
+        setUnreadCount(prev => prev + 1);
+        setLatestChatMsg(msg);
+        setTimeout(() => setLatestChatMsg(current => (current?.id === msg.id ? null : current)), 4000);
+      }
+    };
+
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+    socket.on('state', applyRoomState);
+    socket.on('you', onYou);
+    socket.on('turnTimeout', onTimeout);
+    socket.on('chat', onChat);
+    socket.connect();
+
+    return () => {
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
+      socket.off('state', applyRoomState);
+      socket.off('you', onYou);
+      socket.off('turnTimeout', onTimeout);
+      socket.off('chat', onChat);
+      socket.disconnect();
+    };
+  }, [applyRoomState, enterRoom]);
 
   // --- Turn Timer Logic ---
+  // Online: o servidor controla o tempo; aqui só mostramos a contagem.
   useEffect(() => {
-    if (view === 'game' && !winner) {
+    if (!isOnline || !turnEndsAt) return;
+    const tick = () => setTimeLeft(Math.max(0, Math.ceil((turnEndsAt - Date.now()) / 1000)));
+    tick();
+    const timer = setInterval(tick, 250);
+    return () => clearInterval(timer);
+  }, [isOnline, turnEndsAt]);
+
+  // Local: contagem decrescente no próprio navegador.
+  useEffect(() => {
+    if (!isOnline && view === 'game' && !winner) {
       setTimeLeft(startDelay);
     }
-  }, [currentPlayerIdx, view, winner, startDelay]);
+  }, [currentPlayerIdx, view, winner, startDelay, isOnline]);
 
   useEffect(() => {
-    if (view !== 'game' || winner || timeLeft <= 0) return;
+    if (isOnline || view !== 'game' || winner || timeLeft <= 0) return;
 
     const timer = setInterval(() => {
       setTimeLeft(prev => prev - 1);
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [view, winner, timeLeft > 0]);
+  }, [isOnline, view, winner, timeLeft > 0]);
 
   useEffect(() => {
-    if (view === 'game' && !winner && timeLeft === 0) {
-      // Trigger timeout alert
-      setShowTimeoutAlert(true);
-      setTimeout(() => setShowTimeoutAlert(false), 2000);
-
-      // Only the active player triggers the transition online
-      const isMyTurn = isOnline ? (myPlayerId === currentPlayerIdx) : true;
-
-      if (isMyTurn) {
-        const nextIdx = (currentPlayerIdx + 1) % players.length;
-        if (isOnline && matchId) {
-          supabase.from('matches').update({ current_turn: nextIdx }).eq('id', matchId).then();
-        } else if (!isOnline) {
-          setCurrentPlayerIdx(nextIdx);
-        }
-      }
+    if (!isOnline && view === 'game' && !winner && timeLeft === 0) {
+      triggerTimeoutAlert();
+      setCurrentPlayerIdx(prev => (prev + 1) % players.length);
     }
-  }, [timeLeft, view, winner, isOnline, myPlayerId, currentPlayerIdx, matchId, players.length]);
-
-  // --- Common Online Game Loader ---
-  const loadOnlineMatchData = async (match: any, myIndex: number) => {
-    setMatchId(match.id);
-    setRoomCode(match.code);
-    setMyPlayerId(myIndex);
-    setIsHost(myIndex === 0);
-    setPlayers(match.players);
-    setIsOnline(true);
-    setCurrentPlayerIdx(match.current_turn);
-    setNumPlayers(match.players.length);
-    if (match.start_delay) setStartDelay(match.start_delay);
-    localStorage.setItem('dotbox-match-id', match.id);
-
-    if (match.status === 'playing') {
-      setView('game');
-      const { data: moves } = await supabase.from('moves').select('*').eq('match_id', match.id).order('created_at', { ascending: true });
-      if (moves) {
-        let tempLines: Line[] = [];
-        for (let r = 0; r < GRID_SIZE; r++) { for (let c = 0; c < GRID_SIZE - 1; c++) { tempLines.push({ id: `h-${r}-${c}`, p1: [r, c], p2: [r, c + 1], ownerId: null, orientation: 'horizontal' }); } }
-        for (let r = 0; r < GRID_SIZE - 1; r++) { for (let c = 0; c < GRID_SIZE; c++) { tempLines.push({ id: `v-${r}-${c}`, p1: [r, c], p2: [r + 1, c], ownerId: null, orientation: 'vertical' }); } }
-
-        let tempBoxes: Box[] = [];
-        for (let r = 0; r < GRID_SIZE - 1; r++) { for (let c = 0; c < GRID_SIZE - 1; c++) { tempBoxes.push({ id: `box-${r}-${c}`, row: r, col: c, ownerId: null }); } }
-
-        moves.forEach((m: any) => {
-          const l = tempLines.find(x => x.id === m.line_id);
-          if (l) l.ownerId = m.player_id;
-          tempBoxes = tempBoxes.map(box => {
-            if (box.ownerId !== null) return box;
-            const t = tempLines.find(x => x.id === `h-${box.row}-${box.col}`);
-            const b = tempLines.find(x => x.id === `h-${box.row + 1}-${box.col}`);
-            const l = tempLines.find(x => x.id === `v-${box.row}-${box.col}`);
-            const r = tempLines.find(x => x.id === `v-${box.row}-${box.col + 1}`);
-            if (t?.ownerId !== null && b?.ownerId !== null && l?.ownerId !== null && r?.ownerId !== null) return { ...box, ownerId: m.player_id };
-            return box;
-          });
-        });
-
-        setLines(tempLines);
-        setBoxes(tempBoxes);
-
-        const newScores = new Array(match.players.length).fill(0);
-        tempBoxes.forEach((b: Box) => {
-          if (b.ownerId !== null && b.ownerId < newScores.length) newScores[b.ownerId]++;
-        });
-        setPlayers((prev: any[]) => prev.map((p, i) => ({ ...p, score: newScores[i] || 0 })));
-      }
-    } else {
-      setView('lobby');
-    }
-  };
+  }, [timeLeft, view, winner, isOnline, players.length]);
 
   // --- Theme Effect ---
   useEffect(() => {
@@ -300,45 +276,8 @@ const App: React.FC = () => {
 
   // --- Board Initialization (Reset) ---
   const initBoard = useCallback(() => {
-    const initialLines: Line[] = [];
-    // Horizontal lines
-    for (let r = 0; r < GRID_SIZE; r++) {
-      for (let c = 0; c < GRID_SIZE - 1; c++) {
-        initialLines.push({
-          id: `h-${r}-${c}`,
-          p1: [r, c],
-          p2: [r, c + 1],
-          ownerId: null,
-          orientation: 'horizontal'
-        });
-      }
-    }
-    // Vertical lines
-    for (let r = 0; r < GRID_SIZE - 1; r++) {
-      for (let c = 0; c < GRID_SIZE; c++) {
-        initialLines.push({
-          id: `v-${r}-${c}`,
-          p1: [r, c],
-          p2: [r + 1, c],
-          ownerId: null,
-          orientation: 'vertical'
-        });
-      }
-    }
-    setLines(initialLines);
-
-    const initialBoxes: Box[] = [];
-    for (let r = 0; r < GRID_SIZE - 1; r++) {
-      for (let c = 0; c < GRID_SIZE - 1; c++) {
-        initialBoxes.push({
-          id: `box-${r}-${c}`,
-          row: r,
-          col: c,
-          ownerId: null
-        });
-      }
-    }
-    setBoxes(initialBoxes);
+    setLines(createLines());
+    setBoxes(createBoxes());
   }, []);
 
   // --- Local Game ---
@@ -354,148 +293,38 @@ const App: React.FC = () => {
 
   // --- Multiplayer Logic ---
 
-  const cleanupOldRooms = async () => {
-    // 1. Clean finished games older than 5 minutes
-    try {
-      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-      await supabase
-        .from('matches')
-        .delete()
-        .eq('status', 'finished')
-        .lt('created_at', fiveMinutesAgo);
-
-      // 2. Clean inactive games (> 10 minutes since last activity)
-      // This covers both "Zombie Rooms" (host left) and "Abandoned Games" (everyone lazily left)
-      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-
-      // We check for 'last_activity' column. If user didn't run SQL yet, this might error/fail silently, 
-      // but that's acceptable for a 'lazy' cleanup background task.
-      await supabase
-        .from('matches')
-        .delete()
-        .lt('last_activity', tenMinutesAgo);
-
-    } catch (e) {
-      console.error("Cleanup error", e);
-    }
-  };
-
-  // 1. Create Room (Secure)
-  const createRoom = async () => {
+  const runRequest = async (action: () => Promise<void>) => {
     setLoading(true);
     try {
-      // Lazy cleanup
-      cleanupOldRooms();
-
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error("Not authenticated");
-
-      const code = Math.random().toString(36).substring(2, 6).toUpperCase();
-      // Use Custom Name
-      const hostPlayer = { ...PLAYERS_INIT[0], name: playerName, score: 0, auth_id: user.id };
-
-      const { data, error } = await supabase
-        .from('matches')
-        .insert({
-          code,
-          status: 'waiting',
-          players: [hostPlayer],
-          current_turn: 0
-        })
-        .select()
-        .single();
-
-      if (error) throw error;
-      if (data) {
-        setMatchId(data.id);
-        setRoomCode(code);
-        setMyPlayerId(0);
-        setIsHost(true);
-        setPlayers([hostPlayer]);
-        setIsOnline(true);
-        setView('lobby');
-        localStorage.setItem('dotbox-match-id', data.id); // Save for reconnect
-      }
-    } catch (err) {
-      console.error('Error creating room:', err);
-      alert('Erro ao criar sala. Verifique sua conexão.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // 2. Join Room (Secure via RPC)
-  const joinRoom = async () => {
-    if (!joinCode) return;
-    setLoading(true);
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        await supabase.auth.signInAnonymously();
-      }
-
-      // We need to determine our "Name" and "Color" before joining or let RPC assign?
-      // For now, let's fetch the match size first to determine color locally? 
-      // No, RPC handles concurrent joins better.
-      // But we need to know what color/name to ask for.
-      // Simplify: Pass generic "Guest" and let RPC or Client logic handle index?
-      // My RPC implementation accepts (player_name, player_color).
-
-      // Hack: We don't know the index yet, so we can't pick the color from PLAYERS_INIT correctly without querying first.
-      // But querying first is race-condition prone.
-      // Let's query first to get "probable" index.
-
-      const { data: match, error: fetchError } = await supabase
-        .from('matches')
-        .select('players')
-        .eq('code', joinCode.toUpperCase())
-        .single();
-
-      if (fetchError || !match) throw new Error("Sala não encontrada");
-
-      const distinctIndex = match.players.length;
-      if (distinctIndex >= PLAYERS_INIT.length) throw new Error("Sala cheia");
-
-      const myInit = PLAYERS_INIT[distinctIndex];
-
-      const { data: rpcData, error: rpcError } = await supabase.rpc('join_match', {
-        code_input: joinCode.toUpperCase(),
-        player_name: playerName, // Use Custom Name
-        player_color: myInit.color
-      });
-
-      if (rpcError) throw rpcError;
-
-      const { match_id, player_id } = rpcData as any;
-
-      // We manually fetch the match full state now to sync up
-      const { data: fullMatch, error: loadError } = await supabase
-        .from('matches')
-        .select('*')
-        .eq('id', match_id)
-        .single();
-
-      if (loadError || !fullMatch) throw loadError;
-
-      // Use the helper to load everything
-      await loadOnlineMatchData(fullMatch, Number(player_id));
-
+      await action();
     } catch (err: any) {
-      console.error('Error joining room:', err);
-      alert(err.message || 'Erro ao entrar na sala.');
+      console.error(err);
+      alert(err.message || 'Erro de ligação ao servidor.');
     } finally {
       setLoading(false);
     }
   };
 
-  // 3. Leave Room (Cleanup)
+  // 1. Create Room
+  const createRoom = () => runRequest(async () => {
+    const res = await request<any>('create', { name: playerName, token: getPlayerToken() });
+    enterRoom(res);
+  });
+
+  // 2. Join Room
+  const joinRoom = () => {
+    if (!joinCode) return;
+    return runRequest(async () => {
+      const res = await request<any>('join', { code: joinCode.toUpperCase(), name: playerName, token: getPlayerToken() });
+      enterRoom(res);
+    });
+  };
+
+  // 3. Leave Room
   const leaveRoom = async () => {
+    localStorage.removeItem(ROOM_KEY);
     try {
-      if (matchId) {
-        await supabase.rpc('leave_match', { match_id_input: matchId });
-      }
-      localStorage.removeItem('dotbox-match-id'); // Clear save
-      localStorage.removeItem('dotbox-match-id'); // Clear save
+      if (isOnline) await request('leave');
     } catch (e) {
       console.error("Error leaving match", e);
     } finally {
@@ -504,135 +333,41 @@ const App: React.FC = () => {
   };
 
   // 4. Start Online Game
-  const startOnlineGame = async () => {
-    if (!matchId || !isHost) return;
+  const startOnlineGame = () => {
+    if (!isHost) return;
+    return runRequest(() => request('start').then(() => undefined));
+  };
 
-    // Clear any previous moves for this match (just in case)
-    await supabase.from('moves').delete().eq('match_id', matchId);
-
-    const { error } = await supabase
-      .from('matches')
-      .update({ status: 'playing' })
-      .eq('id', matchId);
-
-    if (error) {
-      console.error('Error starting game:', error);
-      alert('Erro ao iniciar jogo.');
+  const saveSettings = async () => {
+    setIsUpdatingSettings(true);
+    try {
+      await request('setDelay', { seconds: startDelay });
+      setIsSettingsOpen(false);
+    } catch (err: any) {
+      alert(`Erro ao salvar: ${err.message || 'Erro desconhecido'}`);
+    } finally {
+      setIsUpdatingSettings(false);
     }
   };
 
-  // 5. Realtime Subscriptions
-  useEffect(() => {
-    if (!matchId) return;
-
-    // Listen to Match updates (players joining, status change)
-    const matchSub = supabase
-      .channel(`match:${matchId}`)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'matches', filter: `id=eq.${matchId}` }, (payload) => {
-        const newMatch = payload.new as Match;
-
-        // Sync players list in lobby
-        if (newMatch.players) {
-          setPlayers(currentPlayers => {
-            // If we are playing, we must NOT overwrite scores with 0 from DB
-            if (view === 'game') {
-              return newMatch.players.map(remote => {
-                const local = currentPlayers.find(l => l.id === remote.id);
-                return local ? { ...remote, score: local.score } : remote;
-              });
-            }
-            return newMatch.players;
-          });
-          setNumPlayers(newMatch.players.length);
-        }
-
-        // Sync game start
-        if (newMatch.status === 'playing' && view === 'lobby') {
-          initBoard();
-          setView('game');
-        }
-
-        // Sync turn
-        setCurrentPlayerIdx(newMatch.current_turn);
-
-        // Sync start delay (if host changed it)
-        if (newMatch.start_delay !== undefined) {
-          setStartDelay(newMatch.start_delay);
-        }
-      })
-      .subscribe();
-
-    // Listen to Moves (gameplay)
-    const movesSub = supabase
-      .channel(`moves:${matchId}`)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'moves', filter: `match_id=eq.${matchId}` }, (payload) => {
-        const move = payload.new as Move;
-        // Apply move locally
-        handleMove(move.line_id, move.player_id, true); // true = remote move
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(matchSub);
-      supabase.removeChannel(movesSub);
-    };
-  }, [matchId, view, initBoard]);
-
-  // --- Chat Subscription ---
-  useEffect(() => {
-    if (!matchId) return;
-
-    // Load initial messages (optional, skipping for "temporary" feel, but good for rejoin)
-    // Actually, let's load them so refresh doesn't wipe chat history immediately if match persists.
-    const loadChat = async () => {
-      const { data } = await supabase.from('chat_messages').select('*').eq('match_id', matchId).order('created_at', { ascending: true });
-      if (data) setChatMessages(data);
-    };
-    loadChat();
-
-    const chatSub = supabase
-      .channel(`chat:${matchId}`)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages', filter: `match_id=eq.${matchId}` }, (payload) => {
-        const msg = payload.new as ChatMessage;
-        setChatMessages(prev => [...prev, msg]);
-        if (!isChatOpen) {
-          setUnreadCount(prev => prev + 1);
-          // Trigger Notification Snackbar
-          setLatestChatMsg(msg);
-          const timer = setTimeout(() => setLatestChatMsg(null), 4000);
-          return () => clearTimeout(timer);
-        }
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(chatSub);
-    };
-  }, [matchId]);
-
   const sendChatMessage = async () => {
-    if (!chatInput.trim() || !matchId) return;
+    if (!chatInput.trim() || !isOnline) return;
     const content = chatInput.trim();
     setChatInput(''); // Optimistic clear
 
-    const { error } = await supabase.rpc('send_chat_message', {
-      match_id_input: matchId,
-      content_input: content
-    });
-
-    if (error) {
+    try {
+      await request('chat', { content });
+    } catch (error) {
       console.error("Chat error", error);
       alert("Erro ao enviar mensagem");
     }
   };
 
 
-  // --- Game Logic ---
+  // --- Game Logic (apenas jogo local; online quem decide é o servidor) ---
 
   const checkBoxes = useCallback((currentLines: Line[], currentBoxes: Box[], activePlayerId: number) => {
     let boxesCapturedInThisTurn = 0;
-    const activePlayer = players.find(p => p.id === activePlayerId);
-    if (!activePlayer) return { captured: false, updatedBoxes: currentBoxes };
 
     const updatedBoxes = currentBoxes.map(box => {
       if (box.ownerId !== null) return box;
@@ -644,203 +379,62 @@ const App: React.FC = () => {
 
       if (top?.ownerId !== null && bottom?.ownerId !== null && left?.ownerId !== null && right?.ownerId !== null) {
         boxesCapturedInThisTurn++;
-        return { ...box, ownerId: activePlayer.id };
+        return { ...box, ownerId: activePlayerId };
       }
       return box;
     });
 
-    return {
-      captured: boxesCapturedInThisTurn > 0,
-      capturedCount: boxesCapturedInThisTurn,
-      updatedBoxes
-    };
-  }, [players]);
+    return { captured: boxesCapturedInThisTurn > 0, updatedBoxes };
+  }, []);
 
-  // Unified Move Handler (Local & Remote)
-  const handleMove = useCallback((lineId: string, playerId: number, isRemote: boolean) => {
-    setLines(prevLines => {
-      const lineIndex = prevLines.findIndex(l => l.id === lineId);
-      if (lineIndex === -1 || prevLines[lineIndex].ownerId !== null) return prevLines;
+  const handleLocalMove = (lineId: string, playerId: number) => {
+    const lineIndex = lines.findIndex(l => l.id === lineId);
+    if (lineIndex === -1 || lines[lineIndex].ownerId !== null) return;
 
-      const newLines = [...prevLines];
-      newLines[lineIndex] = { ...newLines[lineIndex], ownerId: playerId };
+    const newLines = [...lines];
+    newLines[lineIndex] = { ...newLines[lineIndex], ownerId: playerId };
+    const { captured, updatedBoxes } = checkBoxes(newLines, boxes, playerId);
 
-      setBoxes(prevBoxes => {
-        const { captured, capturedCount, updatedBoxes } = checkBoxes(newLines, prevBoxes, playerId);
-
-        // Update score - REMOVED redundant update to fix visual duplication
-        // The score is now derived from boxes state via playersWithScores useMemo
-
-        // Turn logic
-        // Turn logic
-        if (!captured) {
-          // Only update turn locally if it is a LOCAL game.
-          // For Online games, we rely on the DB update via subscription.
-          // This prevents race conditions and Desync.
-          if (!isRemote) {
-            setCurrentPlayerIdx(prev => (prev + 1) % players.length);
-          }
-        } else {
-          // Same player plays again
-        }
-
-        return updatedBoxes;
-      });
-
-      return newLines;
-    });
-  }, [checkBoxes, players.length]);
-
-  // Fix turn switching logic which needs access to latest state
-  // We'll separate the turn switching side-effect
-  const processTurnSwitch = (captured: boolean, currentIdx: number, totalPlayers: number) => {
+    setLines(newLines);
+    setBoxes(updatedBoxes);
     if (!captured) {
-      return (currentIdx + 1) % totalPlayers;
+      setCurrentPlayerIdx(prev => (prev + 1) % players.length);
+    } else {
+      setTimeLeft(startDelay); // Same player plays again
     }
-    return currentIdx;
-  }
+  };
 
   // --- UI Handlers ---
 
   const handleLineClick = async (lineId: string) => {
     if (winner) return;
 
-    // Validation
     const line = lines.find(l => l.id === lineId);
     if (!line || line.ownerId !== null) return;
 
-    // Online Rules
     if (isOnline) {
       if (currentPlayerIdx !== myPlayerId) {
         triggerSnackbar();
         return; // Not my turn
       }
-
-      // Send move to DB
-      // Optimistic UI could be added here, but for now we wait for Realtime echo or just fire and forget if we trust consistency
-      // Actually, to update turn and score properly across clients, we should rely on the DB.
-      // But 'handleMove' applies changes.
-      // Let's Insert into Supabase and let the subscription handle the state update for everyone (including me) to keep it in sync.
-
-      // We rely SOLELY on the RPC for moves to respect RLS.
-      await submitMoveOnline(lineId);
-
-      // Pre-calc capture to update turn in DB
-      let willCapture = false;
-      // We need to check against CURRENT state (which is in state 'lines' and 'boxes')
-      // ... Logic reuse is tricky inside async.
-      // Let's duplicate check logic for the DB update
-
-      // ... actually, let's just insert the move.
-      // The tricky part: Updating 'current_turn' in the 'matches' table so everyone knows whose turn it is.
-      // We need to calculate if this move captures a box.
-      const top = lines.find(l => l.id === `h-${lineId.split('-')[1]}-${lineId.split('-')[2]}`); // Very rough finding
-      // Better: Use checkBoxes logic.
-
-      // SIMPLIFICATION:
-      // We will optimistic update locally? No, let's wait for echo?
-      // Issue: If I rely on Echo, I can't update 'current_turn' on the DB accurately without knowing the result.
-      // Solution: Calculate "Is Capture?" locally.
-      // BUT, we need access to the most recent 'lines' state.
-
-      // Let's implement a specific helper for Move + Turn Update
-      // (Duplicate call removed)
-
+      try {
+        await request('move', { lineId });
+      } catch (err) {
+        console.error('Error submitting move:', err);
+      }
     } else {
-      // Local play
-      // Logic inside handleMoveWrapper?
-      // Re-implementing simplified local logic to match old behavior
-
-      handleMove(lineId, players[currentPlayerIdx].id, false);
-      // Turn switch is handled inside handleMove for local games
-    }
-  };
-
-  const submitMoveOnline = async (lineId: string) => {
-    // 1. Calculate result locally to determine next turn
-    const lineIndex = lines.findIndex(l => l.id === lineId);
-    const newLines = [...lines];
-    newLines[lineIndex] = { ...newLines[lineIndex], ownerId: myPlayerId }; // Temporarily apply to check
-
-    let captures = 0;
-    boxes.forEach(box => {
-      if (box.ownerId !== null) return;
-      const ids = [`h-${box.row}-${box.col}`, `h-${box.row + 1}-${box.col}`, `v-${box.row}-${box.col}`, `v-${box.row}-${box.col + 1}`];
-      const isClosed = ids.every(id => {
-        const l = newLines.find(nl => nl.id === id);
-        return l?.ownerId !== null;
-      });
-      if (isClosed) captures++;
-    });
-
-    const nextTurn = captures > 0 ? myPlayerId : (currentPlayerIdx + 1) % numPlayers;
-
-    // 2. Call RPC
-    // We pass 'nextTurn' to the server. The server verifies it's a valid player index, 
-    // checks our Auth, checks line availability, inserts the move, and updates the match turn.
-
-    // Note: We do NOT update the score here. The score is derived from board state.
-    // However, the `matches` table has a `players` column with 'score'.
-    // If we want the score to be persistent in DB, we should update it.
-    // But 'play_move' RPC in Phase 1 only updates Turn.
-    // To update Score Securely, the Server must calculate it. 
-    // For now, we accept that Score in DB might lag or we send it? 
-    // Sending it is insecure.
-    // Let's assume Score is Visual for now or we trust the Host to update it periodically?
-    // Actually, 'handleMove' updates local state.
-    // If we want to persist score for reloading, we need a way.
-    // Let's add 'score_update' to RPC? Too complex for now.
-    // We will rely on EVENTUAL CONSISTENCY from Replay?
-    // No, 'matches' table holds players state. Use 'update_score' RPC later?
-    // For now, let's just create the move. The turn is pivotal.
-
-    if (captures > 0 && myPlayerId !== null) {
-      // We should update our score in the DB too, to keep refreshing clients happy.
-      // But RLS prevents us from updating 'matches' directly if we are not Host?
-      // The 'Host can update match' policy allows HOST. But if I am guest?
-      // I cannot update my score.
-
-      // Major Issue: Guests cannot update their score in DB.
-      // Solution: 'play_move' should calculate capture.
-      // Workaround for this task: We might fail to update score in DB for guests.
-      // This renders the game 'visual only' for guests (score resets on reload).
-      // User asked for Security.
-      // I will stick to 'play_move' RPC.
-      // Use a 'notify_user' later to warn about this or fix it if I have time.
-      // (I can try to call an insecure "update_my_score" function if I made one, but I didn't).
-    }
-
-    const { error } = await supabase.rpc('play_move', {
-      match_id_input: matchId,
-      line_id_input: lineId,
-      next_turn_idx: nextTurn
-    });
-
-    if (error) {
-      console.error('Error submitting move:', error);
-      // Revert local state? 
-      // handleMove isn't called yet? 
-      // handleLineClick called submitMoveOnline.
-      // We should probably NOT apply optimistically if we fear rejection, 
-      // but 'handleMove' inside subscription will apply it.
+      handleLocalMove(lineId, players[currentPlayerIdx].id);
     }
   };
 
 
-  // --- Winner Check ---
+  // --- Winner Check (local) ---
   useEffect(() => {
-    if (gameStarted() && boxes.length > 0 && boxes.every(b => b.ownerId !== null)) {
+    if (!isOnline && view === 'game' && boxes.length > 0 && boxes.every(b => b.ownerId !== null)) {
       const sorted = [...playersWithScores].sort((a, b) => b.score - a.score);
       setWinner(sorted[0]);
-
-      if (isHost && isOnline && matchId) {
-        supabase.from('matches').update({ status: 'finished', winner: sorted[0] }).eq('id', matchId).then();
-      }
     }
-  }, [boxes, players, isHost, isOnline, matchId]);
-
-  const gameStarted = () => view === 'game';
-
+  }, [boxes, playersWithScores, isOnline, view]);
 
   // --- Views ---
 
@@ -895,10 +489,10 @@ const App: React.FC = () => {
 
             <button
               onClick={createRoom}
-              disabled={loading}
+              disabled={loading || !isConnected}
               className="w-full h-14 px-8 py-4 bg-slate-900 text-white rounded-full shadow-xl font-black text-xs uppercase tracking-widest hover:bg-slate-800 active:scale-95 transition-all"
             >
-              Criar Sala
+              {isConnected ? 'Criar Sala' : 'A ligar ao servidor...'}
             </button>
 
             <div className="flex gap-2">
@@ -912,7 +506,7 @@ const App: React.FC = () => {
               />
               <button
                 onClick={joinRoom}
-                disabled={loading || joinCode.length < 4}
+                disabled={loading || !isConnected || joinCode.length < 4}
                 className="h-14 px-4 md:px-8 bg-white text-slate-600 rounded-full shadow-xl hover:bg-slate-50 active:scale-95 transition-all border border-slate-200 flex items-center justify-center shrink-0"
               >
                 <span className="md:hidden material-symbols-rounded text-2xl font-normal text-slate-900">login</span>
@@ -1031,22 +625,7 @@ const App: React.FC = () => {
 
                 <div className="flex flex-col gap-3">
                   <button
-                    onClick={async () => {
-                      setIsUpdatingSettings(true);
-                      try {
-                        const { error } = await supabase
-                          .from('matches')
-                          .update({ start_delay: startDelay })
-                          .eq('id', matchId);
-                        if (error) throw error;
-                        setIsSettingsOpen(false);
-                      } catch (err: any) {
-                        alert(`Erro ao salvar: ${err.message || 'Erro desconhecido'}`);
-                        console.error(err);
-                      } finally {
-                        setIsUpdatingSettings(false);
-                      }
-                    }}
+                    onClick={saveSettings}
                     disabled={isUpdatingSettings}
                     className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black text-lg hover:bg-blue-700 transition-all active:scale-95 shadow-lg disabled:opacity-50"
                   >
@@ -1357,7 +936,7 @@ const App: React.FC = () => {
               <span className="block text-sm opacity-80">{winner.score} pontos</span>
             </div>
             <button
-              onClick={() => window.location.reload()}
+              onClick={leaveRoom}
               className="w-full py-5 bg-slate-900 text-white rounded-3xl font-black text-lg hover:bg-slate-800 transition-all active:scale-95 shadow-lg"
             >
               Menu Principal

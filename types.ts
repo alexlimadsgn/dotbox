@@ -3,7 +3,8 @@ export type Player = {
   name: string;
   color: string;
   score: number;
-  auth_id?: string;
+  connected?: boolean;
+  left?: boolean;
 };
 
 export type Line = {
@@ -23,30 +24,24 @@ export type Box = {
 
 export type MatchStatus = 'waiting' | 'playing' | 'finished';
 
-export interface Match {
-  id: string;
+// Estado da sala tal como o servidor o envia
+export interface RoomState {
   code: string;
   status: MatchStatus;
   players: Player[];
-  current_turn: number;
-  winner: Player | null; // stored as JSON
-  created_at: string;
-  start_delay: number;
+  hostId: number | null;
+  currentTurn: number;
+  lines: Record<string, number | null>;
+  boxes: Record<string, number | null>;
+  winner: Player | null;
+  startDelay: number;
+  turnEndsAt: number | null;
 }
 
 export interface ChatMessage {
   id: string;
-  match_id: string;
   player_id: number;
   player_name: string;
   content: string;
   created_at: string;
-};
-
-export type Move = {
-  id: string;
-  match_id: string;
-  player_id: number;
-  line_id: string;
-  created_at: string;
-};
+}
