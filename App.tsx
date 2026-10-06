@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { Player, Line, Box, RoomState, ChatMessage } from './types';
 import { GRID_SIZE, PLAYERS_INIT, BOX_SIZE, DOT_RADIUS } from './constants';
-import { socket, request, getPlayerToken } from './src/lib/socket';
+import { socket, request, getPlayerToken, createRoomCode } from './src/lib/socket';
 
 type ViewState = 'menu' | 'lobby' | 'game';
 
@@ -55,7 +55,6 @@ const App: React.FC = () => {
   const [myPlayerId, setMyPlayerId] = useState<number | null>(null); // Local ID in the room (0, 1, 2...)
   const [hostId, setHostId] = useState<number | null>(null);
   const [isOnline, setIsOnline] = useState(false);
-  const [isConnected, setIsConnected] = useState(socket.connected);
   const [turnEndsAt, setTurnEndsAt] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const isHost = isOnline && myPlayerId !== null && myPlayerId === hostId;
@@ -161,21 +160,27 @@ const App: React.FC = () => {
     localStorage.setItem(ROOM_KEY, res.state.code);
   }, [applyRoomState]);
 
-  // --- Online: ligação ao servidor e eventos ---
+  // --- Online: eventos da sala ---
+  const connectToRoom = useCallback(async (code: string, payload: object) => {
+    await socket.connect(code);
+    const res = await request<any>('join', { code, token: getPlayerToken(), ...payload });
+    enterRoom(res);
+  }, [enterRoom]);
+
   useEffect(() => {
-    const onConnect = async () => {
-      setIsConnected(true);
-      // Ao (re)ligar, tenta voltar à sala guardada (recarregar página, queda de rede, etc.)
-      const savedCode = localStorage.getItem(ROOM_KEY);
-      if (!savedCode) return;
+    // Voltar à sala depois de uma queda de rede.
+    const onReconnect = async () => {
       try {
-        const res = await request<any>('join', { code: savedCode, token: getPlayerToken(), resumeOnly: true });
-        enterRoom(res);
+        enterRoom(await request<any>('join', { token: getPlayerToken(), resumeOnly: true }));
       } catch {
-        localStorage.removeItem(ROOM_KEY);
+        onLost();
       }
     };
-    const onDisconnect = () => setIsConnected(false);
+    // Sala encerrada, aberta noutro separador, ou impossível voltar a ligar.
+    const onLost = () => {
+      localStorage.removeItem(ROOM_KEY);
+      window.location.reload();
+    };
     const onYou = ({ playerId }: { playerId: number }) => setMyPlayerId(playerId);
     const onTimeout = () => triggerTimeoutAlert();
     const onChat = (msg: ChatMessage) => {
@@ -187,24 +192,35 @@ const App: React.FC = () => {
       }
     };
 
-    socket.on('connect', onConnect);
-    socket.on('disconnect', onDisconnect);
+    socket.on('reconnect', onReconnect);
+    socket.on('lost', onLost);
     socket.on('state', applyRoomState);
     socket.on('you', onYou);
     socket.on('turnTimeout', onTimeout);
     socket.on('chat', onChat);
-    socket.connect();
+
+    // Ao abrir a página, tenta voltar à sala guardada.
+    const savedCode = localStorage.getItem(ROOM_KEY);
+    if (savedCode) {
+      setLoading(true);
+      connectToRoom(savedCode, { resumeOnly: true })
+        .catch(() => {
+          localStorage.removeItem(ROOM_KEY);
+          socket.close();
+        })
+        .finally(() => setLoading(false));
+    }
 
     return () => {
-      socket.off('connect', onConnect);
-      socket.off('disconnect', onDisconnect);
+      socket.off('reconnect', onReconnect);
+      socket.off('lost', onLost);
       socket.off('state', applyRoomState);
       socket.off('you', onYou);
       socket.off('turnTimeout', onTimeout);
       socket.off('chat', onChat);
-      socket.disconnect();
+      socket.close();
     };
-  }, [applyRoomState, enterRoom]);
+  }, [applyRoomState, enterRoom, connectToRoom]);
 
   // --- Turn Timer Logic ---
   // Online: o servidor controla o tempo; aqui só mostramos a contagem.
@@ -307,16 +323,20 @@ const App: React.FC = () => {
 
   // 1. Create Room
   const createRoom = () => runRequest(async () => {
-    const res = await request<any>('create', { name: playerName, token: getPlayerToken() });
-    enterRoom(res);
+    const code = await createRoomCode();
+    await connectToRoom(code, { name: playerName });
   });
 
   // 2. Join Room
   const joinRoom = () => {
     if (!joinCode) return;
     return runRequest(async () => {
-      const res = await request<any>('join', { code: joinCode.toUpperCase(), name: playerName, token: getPlayerToken() });
-      enterRoom(res);
+      try {
+        await connectToRoom(joinCode.toUpperCase(), { name: playerName });
+      } catch (err) {
+        socket.close();
+        throw err;
+      }
     });
   };
 
@@ -325,6 +345,7 @@ const App: React.FC = () => {
     localStorage.removeItem(ROOM_KEY);
     try {
       if (isOnline) await request('leave');
+      socket.close();
     } catch (e) {
       console.error("Error leaving match", e);
     } finally {
@@ -489,10 +510,10 @@ const App: React.FC = () => {
 
             <button
               onClick={createRoom}
-              disabled={loading || !isConnected}
+              disabled={loading}
               className="w-full h-14 px-8 py-4 bg-slate-900 text-white rounded-full shadow-xl font-black text-xs uppercase tracking-widest hover:bg-slate-800 active:scale-95 transition-all"
             >
-              {isConnected ? 'Criar Sala' : 'A ligar ao servidor...'}
+              Criar Sala
             </button>
 
             <div className="flex gap-2">
@@ -506,7 +527,7 @@ const App: React.FC = () => {
               />
               <button
                 onClick={joinRoom}
-                disabled={loading || !isConnected || joinCode.length < 4}
+                disabled={loading || joinCode.length < 4}
                 className="h-14 px-4 md:px-8 bg-white text-slate-600 rounded-full shadow-xl hover:bg-slate-50 active:scale-95 transition-all border border-slate-200 flex items-center justify-center shrink-0"
               >
                 <span className="md:hidden material-symbols-rounded text-2xl font-normal text-slate-900">login</span>

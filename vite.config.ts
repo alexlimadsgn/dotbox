@@ -9,9 +9,10 @@ export default defineConfig(() => {
     server: {
       port: 3000,
       host: '0.0.0.0',
-      // Em dev, o servidor de jogo corre à parte (npm run server) na porta 3001
+      // Em dev, o Worker corre à parte (npm run dev:worker) na porta 8787
       proxy: {
-        '/socket.io': { target: 'http://localhost:3001', ws: true },
+        '/api': 'http://localhost:8787',
+        '/ws': { target: 'ws://localhost:8787', ws: true },
       },
     },
     plugins: [
@@ -19,6 +20,10 @@ export default defineConfig(() => {
       VitePWA({
         registerType: 'autoUpdate',
         includeAssets: ['favicon.png', 'apple-touch-icon.png', 'masked-icon.svg'],
+        workbox: {
+          // As rotas do Worker nunca devem ser servidas pelo service worker
+          navigateFallbackDenylist: [/^\/api\//, /^\/ws\//],
+        },
         manifest: {
           name: 'Dotbox Multiplayer',
           short_name: 'Dotbox',

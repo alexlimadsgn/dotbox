@@ -5,27 +5,23 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "server": "node --watch server/index.js",
+    "dev:worker": "wrangler dev",
     "build": "vite build",
-    "start": "node server/index.js",
-    "preview": "vite preview"
+    "deploy": "vite build && wrangler deploy",
+    "preview": "vite build && wrangler dev"
   },
   "dependencies": {
-    "express": "^5.2.1",
     "framer-motion": "^12.26.2",
     "react": "^19.2.3",
-    "react-dom": "^19.2.3",
-    "socket.io": "^4.8.4",
-    "socket.io-client": "^4.8.4"
+    "react-dom": "^19.2.3"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261006.1",
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.0",
-    "vite-plugin-pwa": "^1.2.0"
-  },
-  "engines": {
-    "node": ">=20"
+    "vite-plugin-pwa": "^1.2.0",
+    "wrangler": "^4.147.0"
   }
 }
