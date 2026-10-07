@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { Player, Line, Box, RoomState, ChatMessage } from './types';
 import { GRID_SIZE, PLAYERS_INIT, BOX_SIZE, DOT_RADIUS } from './constants';
+import { motion, LayoutGroup } from 'framer-motion';
 import { socket, request, getPlayerToken, createRoomCode } from './src/lib/socket';
 
 type ViewState = 'menu' | 'lobby' | 'game';
@@ -274,7 +275,7 @@ const App: React.FC = () => {
   useEffect(() => {
     const handleResize = () => {
       if (view !== 'game') return;
-      const padding = 40;
+      const padding = 32; // margem lateral de 16px de cada lado
       const rawWidth = (GRID_SIZE - 1) * BOX_SIZE + DOT_RADIUS * 2 + 80; // grid + padding interno do card
       const availableWidth = window.innerWidth - padding;
 
@@ -675,11 +676,14 @@ const App: React.FC = () => {
   }
 
   // --- Game View (Local & Online) ---
+  const playerLabel = (p: Player, idx: number) =>
+    p.name && p.name.trim() !== '' && p.name !== 'Jogador' && p.name !== `Jogador ${idx + 1}` ? p.name : idx + 1;
+
   const currentPlayer = players[currentPlayerIdx];
   const boardWidth = (GRID_SIZE - 1) * BOX_SIZE + DOT_RADIUS * 2;
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-900 flex flex-col items-center justify-center p-4 md:p-8 overflow-hidden transition-colors relative">
+    <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-900 flex flex-col items-center justify-center px-4 py-6 md:p-8 overflow-hidden transition-colors relative">
       {/* Botão Sair no Canto Superior Direito */}
       <div className="fixed top-4 right-4 md:top-8 md:right-8 z-[100]">
         <button
@@ -690,37 +694,59 @@ const App: React.FC = () => {
           <span className="hidden sm:inline">Sair</span>
         </button>
       </div>
-      {/* Header */}
-      <div className="w-full max-w-6xl flex flex-wrap justify-center gap-4 mb-8">
-        {playersWithScores.map((p, idx) => (
-          <div
-            key={p.id}
-            className={`flex items-center gap-3 px-3 py-2 rounded-full transition-all duration-100 ${currentPlayerIdx === idx ? 'bg-white dark:bg-slate-800 shadow-md ring-2 ring-offset-2 dark:ring-offset-slate-900' : 'opacity-40 grayscale'
-              }`}
-            style={{
-              ringColor: currentPlayerIdx === idx ? p.color : 'transparent',
-            }}
-          >
-            <div
-              className="h-8 min-w-[32px] px-2 rounded-full flex items-center justify-center text-white font-black text-sm shadow-sm transition-all"
-              style={{ backgroundColor: p.color }}
+      {/* Header: jogador da vez em destaque; os restantes em etiquetas pequenas por baixo.
+          O layoutId partilhado faz cada etiqueta deslizar suavemente entre as duas posições. */}
+      <LayoutGroup>
+        <div className="w-full max-w-6xl flex flex-col items-center gap-3 mb-6">
+          {playersWithScores.filter((_, idx) => idx === currentPlayerIdx).map(p => (
+            <motion.div
+              key={p.id}
+              layoutId={`player-${p.id}`}
+              transition={{ type: 'spring', stiffness: 380, damping: 32 }}
+              className="relative flex items-center gap-3 pl-1.5 pr-4 py-1.5 rounded-full bg-white dark:bg-slate-800 shadow-md overflow-hidden"
+              style={{ boxShadow: `0 0 0 2px ${p.color}` }}
             >
-              {(p.name && p.name !== 'Jogador' && p.name !== `Jogador ${idx + 1}` && p.name.trim() !== '') ? p.name : idx + 1}
-            </div>
-            <div className="text-xl font-black text-slate-800 dark:text-white leading-none mr-1">{p.score}</div>
-            
-            {/* Registro visual do tempo no card do jogador atual */}
-            {currentPlayerIdx === idx && !winner && (
-              <div className="absolute -bottom-1 left-2 right-2 h-1 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-red-500 transition-all duration-1000 linear" 
-                  style={{ width: `${(timeLeft / startDelay) * 100}%` }}
-                />
-              </div>
-            )}
+              <motion.div
+                layout="position"
+                className="h-9 min-w-[36px] px-3 rounded-full flex items-center justify-center text-white font-black text-sm shadow-sm"
+                style={{ backgroundColor: p.color }}
+              >
+                {playerLabel(p, p.id)}
+              </motion.div>
+              <motion.div layout="position" className="text-2xl font-black text-slate-800 dark:text-white leading-none">{p.score}</motion.div>
+              {/* Registro visual do tempo no card do jogador atual */}
+              {!winner && (
+                <div className="absolute bottom-0 left-3 right-3 h-1 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-red-500 transition-all duration-1000 linear"
+                    style={{ width: `${(timeLeft / startDelay) * 100}%` }}
+                  />
+                </div>
+              )}
+            </motion.div>
+          ))}
+
+          <div className="flex flex-wrap justify-center gap-2">
+            {playersWithScores.map((p, idx) => idx === currentPlayerIdx ? null : (
+              <motion.div
+                key={p.id}
+                layoutId={`player-${p.id}`}
+                transition={{ type: 'spring', stiffness: 380, damping: 32 }}
+                className={`flex items-center gap-1.5 pl-0.5 pr-2.5 py-0.5 rounded-full bg-white/70 dark:bg-slate-800/70 ${p.left ? 'opacity-30' : 'opacity-70'}`}
+              >
+                <motion.div
+                  layout="position"
+                  className="h-5 min-w-[20px] px-1.5 rounded-full flex items-center justify-center text-white font-bold text-[10px]"
+                  style={{ backgroundColor: p.color }}
+                >
+                  {playerLabel(p, p.id)}
+                </motion.div>
+                <motion.div layout="position" className="text-xs font-black text-slate-600 dark:text-slate-300 leading-none">{p.score}</motion.div>
+              </motion.div>
+            ))}
           </div>
-        ))}
-      </div>
+        </div>
+      </LayoutGroup>
 
       {/* Status Bar for Online */}
       {isOnline && (
@@ -861,9 +887,12 @@ const App: React.FC = () => {
       )}
 
       {/* Board */}
-      <div className="flex-1 flex items-center justify-center w-full overflow-visible">
+      <div
+        className="flex items-center justify-center"
+        style={{ width: (boardWidth + 80) * scale, height: (boardWidth + 80) * scale }}
+      >
         <div
-          className={`relative flex items-center justify-center bg-white dark:bg-slate-800 p-10 rounded-[3rem] shadow-2xl transition-all duration-500 border-4 ${
+          className={`relative shrink-0 flex items-center justify-center bg-white dark:bg-slate-800 p-10 rounded-[3rem] shadow-2xl transition-all duration-500 border-4 ${
             (isOnline ? myPlayerId === currentPlayerIdx : true) && !winner
               ? 'border-red-500/40 dark:border-red-500/30 shadow-[0_0_50px_-12px_rgba(239,68,68,0.3)]'
               : 'border-white dark:border-slate-800 shadow-slate-200/50 dark:shadow-black/20'
@@ -871,7 +900,7 @@ const App: React.FC = () => {
           style={{
             width: (boardWidth + 80),
             height: (boardWidth + 80),
-            scale: scale,
+            transform: `scale(${scale})`,
           }}
         >
           <div className="relative" style={{ width: boardWidth, height: boardWidth }}>
