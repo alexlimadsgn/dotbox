@@ -7,6 +7,9 @@ import { socket, request, getPlayerToken, createRoomCode } from './src/lib/socke
 type ViewState = 'menu' | 'lobby' | 'game';
 
 const ROOM_KEY = 'dotbox-room-code';
+const DESKTOP_MIN_WIDTH = 1024; // a partir daqui: jogadores à esquerda, chat fixo à direita
+const PLAYERS_PANEL_WIDTH = 256;
+const CHAT_PANEL_WIDTH = 320;
 
 const createLines = (): Line[] => {
   const result: Line[] = [];
@@ -42,6 +45,7 @@ const App: React.FC = () => {
   const [boxes, setBoxes] = useState<Box[]>([]);
   const [winner, setWinner] = useState<Player | null>(null);
   const [scale, setScale] = useState(1);
+  const [isDesktop, setIsDesktop] = useState(() => typeof window !== 'undefined' && window.innerWidth >= DESKTOP_MIN_WIDTH);
   const playersWithScores = useMemo(() => {
     return players.map(p => ({
       ...p,
@@ -83,7 +87,8 @@ const App: React.FC = () => {
   const [unreadCount, setUnreadCount] = useState(0);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const isChatOpenRef = useRef(isChatOpen);
-  isChatOpenRef.current = isChatOpen;
+  const isChatDocked = isOnline && isDesktop;
+  isChatOpenRef.current = isChatOpen || isChatDocked;
 
   // --- Start Delay Config ---
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -271,25 +276,37 @@ const App: React.FC = () => {
     setTheme(prev => prev === 'light' ? 'dark' : 'light');
   };
 
-  // Lógica de responsividade para o grid (mantida)
+  // Responsividade: no mobile o tabuleiro encolhe para caber na largura;
+  // no desktop cresce para ocupar o espaço entre o painel dos jogadores e o chat.
   useEffect(() => {
     const handleResize = () => {
+      const viewportWidth = document.documentElement.clientWidth;
+      const desktop = viewportWidth >= DESKTOP_MIN_WIDTH;
+      setIsDesktop(desktop);
       if (view !== 'game') return;
-      const padding = 32; // margem lateral de 16px de cada lado
       const rawWidth = (GRID_SIZE - 1) * BOX_SIZE + DOT_RADIUS * 2 + 80; // grid + padding interno do card
-      const availableWidth = window.innerWidth - padding;
 
-      if (availableWidth < rawWidth) {
-        setScale(availableWidth / rawWidth);
+      if (desktop) {
+        const sidePanels = PLAYERS_PANEL_WIDTH + (isOnline ? CHAT_PANEL_WIDTH : 0);
+        const availableWidth = viewportWidth - sidePanels - 64;
+        const availableHeight = window.innerHeight - 160; // espaço para o botão e o contador
+        setScale(Math.min(1.5, availableWidth / rawWidth, availableHeight / rawWidth));
       } else {
-        setScale(1);
+        const availableWidth = viewportWidth - 32; // margem lateral de 16px de cada lado
+        setScale(Math.min(1, availableWidth / rawWidth));
       }
     };
 
+    // ResizeObserver apanha o tamanho final mesmo quando o evento 'resize' chega a meio (ex.: rodar o ecrã).
+    const observer = new ResizeObserver(handleResize);
+    observer.observe(document.documentElement);
     window.addEventListener('resize', handleResize);
     handleResize();
-    return () => window.removeEventListener('resize', handleResize);
-  }, [view]);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [view, isOnline]);
 
   // --- Board Initialization (Reset) ---
   const initBoard = useCallback(() => {
@@ -683,8 +700,12 @@ const App: React.FC = () => {
   const boardWidth = (GRID_SIZE - 1) * BOX_SIZE + DOT_RADIUS * 2;
 
   return (
-    <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-900 flex flex-col items-center justify-center px-4 py-6 md:p-8 overflow-hidden transition-colors relative">
+    <div
+      className="min-h-[100dvh] bg-slate-50 dark:bg-slate-900 flex flex-col items-center justify-center px-4 py-6 md:p-8 overflow-hidden transition-colors relative"
+      style={isDesktop ? { paddingLeft: PLAYERS_PANEL_WIDTH, paddingRight: isChatDocked ? CHAT_PANEL_WIDTH : undefined } : undefined}
+    >
       {/* Botão Sair no Canto Superior Direito */}
+      {!isDesktop && (
       <div className="fixed top-4 right-4 md:top-8 md:right-8 z-[100]">
         <button
           onClick={leaveRoom}
@@ -694,9 +715,73 @@ const App: React.FC = () => {
           <span className="hidden sm:inline">Sair</span>
         </button>
       </div>
+      )}
       {/* Header: jogador da vez em destaque; os restantes em etiquetas pequenas por baixo.
           O layoutId partilhado faz cada etiqueta deslizar suavemente entre as duas posições. */}
       <LayoutGroup>
+        {isDesktop ? (
+          <aside
+            className="fixed top-0 left-0 bottom-0 z-30 flex flex-col gap-3 p-6 bg-white/60 dark:bg-slate-800/40 border-r border-slate-100 dark:border-slate-800 overflow-y-auto"
+            style={{ width: PLAYERS_PANEL_WIDTH }}
+          >
+            <div className="text-xs uppercase font-black tracking-widest text-slate-400 mb-1">Jogadores</div>
+            {playersWithScores.filter((_, idx) => idx === currentPlayerIdx).map(p => (
+              <motion.div
+                key={p.id}
+                layoutId={`player-${p.id}`}
+                transition={{ type: 'spring', stiffness: 380, damping: 32 }}
+                className="relative flex items-center gap-3 p-2 pr-4 rounded-2xl bg-white dark:bg-slate-800 shadow-md overflow-hidden"
+                style={{ boxShadow: `0 0 0 2px ${p.color}` }}
+              >
+                <motion.div layout="position" className="w-10 h-10 shrink-0 rounded-full flex items-center justify-center text-white font-black" style={{ backgroundColor: p.color }}>
+                  {p.id + 1}
+                </motion.div>
+                <motion.div layout="position" className="flex-1 min-w-0">
+                  <div className="font-black text-slate-800 dark:text-white truncate">{p.name}{p.id === myPlayerId && isOnline ? ' (Você)' : ''}</div>
+                  <div className="text-[10px] uppercase font-black tracking-widest" style={{ color: p.color }}>A jogar</div>
+                </motion.div>
+                <motion.div layout="position" className="text-3xl font-black text-slate-800 dark:text-white leading-none">{p.score}</motion.div>
+                {!winner && (
+                  <div className="absolute bottom-0 left-3 right-3 h-1 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
+                    <div className="h-full bg-red-500 transition-all duration-1000 linear" style={{ width: `${(timeLeft / startDelay) * 100}%` }} />
+                  </div>
+                )}
+              </motion.div>
+            ))}
+            {playersWithScores.map((p, idx) => idx === currentPlayerIdx ? null : (
+              <motion.div
+                key={p.id}
+                layoutId={`player-${p.id}`}
+                transition={{ type: 'spring', stiffness: 380, damping: 32 }}
+                className={`flex items-center gap-3 p-1.5 pr-4 rounded-2xl ${p.left ? 'opacity-30' : 'opacity-70'}`}
+              >
+                <motion.div layout="position" className="w-7 h-7 shrink-0 rounded-full flex items-center justify-center text-white font-bold text-xs" style={{ backgroundColor: p.color }}>
+                  {p.id + 1}
+                </motion.div>
+                <motion.div layout="position" className="flex-1 min-w-0 font-bold text-sm text-slate-600 dark:text-slate-300 truncate">
+                  {p.name}{p.id === myPlayerId && isOnline ? ' (Você)' : ''}
+                </motion.div>
+                <motion.div layout="position" className="text-lg font-black text-slate-600 dark:text-slate-300 leading-none">{p.score}</motion.div>
+              </motion.div>
+            ))}
+
+            <div className="mt-auto flex flex-col gap-3 pt-4">
+              {isOnline && (
+                <div className="text-xs font-bold text-slate-400 flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                  Sala {roomCode}
+                </div>
+              )}
+              <button
+                onClick={leaveRoom}
+                className="flex items-center justify-center gap-2 py-3 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-full shadow font-black text-xs uppercase tracking-widest hover:bg-slate-50 dark:hover:bg-slate-700 active:scale-95 transition-all border border-slate-200 dark:border-slate-700"
+              >
+                <span className="material-symbols-rounded text-lg">logout</span>
+                Sair
+              </button>
+            </div>
+          </aside>
+        ) : (
         <div className="w-full max-w-6xl flex flex-col items-center gap-3 mb-6">
           {playersWithScores.filter((_, idx) => idx === currentPlayerIdx).map(p => (
             <motion.div
@@ -746,10 +831,11 @@ const App: React.FC = () => {
             ))}
           </div>
         </div>
+        )}
       </LayoutGroup>
 
       {/* Status Bar for Online */}
-      {isOnline && (
+      {isOnline && !isDesktop && (
         <div className="mb-4 px-4 py-2 bg-white dark:bg-slate-800 rounded-full shadow-sm text-sm font-bold text-slate-500 dark:text-slate-400 flex items-center gap-2 transition-colors">
           <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
           Sala: {roomCode}
@@ -766,6 +852,7 @@ const App: React.FC = () => {
       {/* Chat UI */}
       {isOnline && view === 'game' && (
         <>
+          {!isChatDocked && (<>
           {/* Floating Chat Button */}
           <button
             onClick={() => setIsChatOpen(!isChatOpen)}
@@ -804,10 +891,13 @@ const App: React.FC = () => {
               <div className="w-1 h-8 bg-blue-500/20 rounded-full" />
             </div>
           )}
+          </>)}
 
           {/* Chat Window */}
           <div
-            className={`fixed z-50 transition-all duration-300 ease-in-out flex flex-col bg-white dark:bg-slate-800 shadow-2xl border-t md:border border-slate-100 dark:border-slate-700 overflow-hidden
+            className={isChatDocked
+              ? 'fixed z-30 top-0 right-0 bottom-0 flex flex-col bg-white dark:bg-slate-800 border-l border-slate-100 dark:border-slate-700 overflow-hidden'
+              : `fixed z-50 transition-all duration-300 ease-in-out flex flex-col bg-white dark:bg-slate-800 shadow-2xl border-t md:border border-slate-100 dark:border-slate-700 overflow-hidden
               ${isChatOpen
                 ? 'translate-y-0 opacity-100'
                 : 'translate-y-full opacity-0 pointer-events-none md:translate-y-0 md:scale-95'
@@ -815,6 +905,7 @@ const App: React.FC = () => {
               bottom-0 left-0 right-0 w-full h-[70vh] rounded-none
               md:bottom-24 md:right-6 md:left-auto md:w-80 md:h-[400px] md:rounded-none md:origin-bottom-right
             `}
+            style={isChatDocked ? { width: CHAT_PANEL_WIDTH } : undefined}
           >
             {/* Mobile Handle - Hit area expanded */}
             <div
@@ -892,7 +983,7 @@ const App: React.FC = () => {
         style={{ width: (boardWidth + 80) * scale, height: (boardWidth + 80) * scale }}
       >
         <div
-          className={`relative shrink-0 flex items-center justify-center bg-white dark:bg-slate-800 p-10 rounded-[3rem] shadow-2xl transition-all duration-500 border-4 ${
+          className={`relative shrink-0 flex items-center justify-center bg-white dark:bg-slate-800 p-10 rounded-[3rem] shadow-2xl transition-[border-color,box-shadow] duration-500 border-4 ${
             (isOnline ? myPlayerId === currentPlayerIdx : true) && !winner
               ? 'border-red-500/40 dark:border-red-500/30 shadow-[0_0_50px_-12px_rgba(239,68,68,0.3)]'
               : 'border-white dark:border-slate-800 shadow-slate-200/50 dark:shadow-black/20'
