@@ -702,8 +702,14 @@ const App: React.FC = () => {
   return (
     <div
       className="min-h-[100dvh] bg-slate-50 dark:bg-slate-900 flex flex-col items-center justify-center px-4 py-6 md:p-8 overflow-hidden transition-colors relative"
-      style={isDesktop ? { paddingLeft: PLAYERS_PANEL_WIDTH, paddingRight: isChatDocked ? CHAT_PANEL_WIDTH : undefined } : undefined}
+      style={isDesktop ? { paddingLeft: PLAYERS_PANEL_WIDTH, paddingRight: isChatDocked ? CHAT_PANEL_WIDTH : 0 } : undefined}
     >
+      {/* Logotipo no canto superior esquerdo (mobile; no desktop fica no painel) */}
+      {!isDesktop && (
+        <div className="fixed top-4 left-4 md:top-8 md:left-8 z-[100] h-10 flex items-center text-xl">
+          <span className="font-black tracking-tighter text-blue-500 dark:text-blue-400">DOT • BOX</span>
+        </div>
+      )}
       {/* Botão Sair no Canto Superior Direito */}
       {!isDesktop && (
       <div className="fixed top-4 right-4 md:top-8 md:right-8 z-[100]">
@@ -724,6 +730,7 @@ const App: React.FC = () => {
             className="fixed top-0 left-0 bottom-0 z-30 flex flex-col gap-3 p-6 bg-white/60 dark:bg-slate-800/40 border-r border-slate-100 dark:border-slate-800 overflow-y-auto"
             style={{ width: PLAYERS_PANEL_WIDTH }}
           >
+            <div className="text-2xl mb-4"><span className="font-black tracking-tighter text-blue-500 dark:text-blue-400">DOT • BOX</span></div>
             <div className="text-xs uppercase font-black tracking-widest text-slate-400 mb-1">Jogadores</div>
             {playersWithScores.filter((_, idx) => idx === currentPlayerIdx).map(p => (
               <motion.div
@@ -771,6 +778,14 @@ const App: React.FC = () => {
                   <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
                   Sala {roomCode}
                 </div>
+              )}
+              {!isOnline && (
+                <button
+                  onClick={() => startLocalGame(numPlayers)}
+                  className="py-3 bg-slate-900 text-white rounded-full shadow-xl font-black text-xs uppercase tracking-widest hover:bg-slate-800 active:scale-95 transition-all"
+                >
+                  Reiniciar
+                </button>
               )}
               <button
                 onClick={leaveRoom}
@@ -1088,7 +1103,7 @@ const App: React.FC = () => {
 
       {/* Floating Controls */}
       <div className="w-full flex justify-center gap-4 mt-4 mb-4">
-        {!isOnline && (
+        {!isOnline && !isDesktop && (
           <button
             onClick={() => startLocalGame(numPlayers)}
             className="px-8 py-4 bg-slate-900 text-white rounded-full shadow-xl font-black text-xs uppercase tracking-widest hover:bg-slate-800 active:scale-95 transition-all"
@@ -1107,7 +1122,9 @@ const App: React.FC = () => {
 
       {/* Turn Countdown (Only for active player) */}
       {view === 'game' && !winner && (isOnline ? myPlayerId === currentPlayerIdx : true) && (
-        <div className={`fixed bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-3 px-4 py-2 rounded-full shadow-xl transition-all duration-500 z-50 border border-white/5 ${timeLeft < 10 ? 'bg-red-600 animate-pulse scale-105' : 'bg-slate-900 shadow-red-500/10'}`}>
+        <div
+          style={isDesktop ? { left: `calc(${PLAYERS_PANEL_WIDTH}px + (100% - ${PLAYERS_PANEL_WIDTH + (isChatDocked ? CHAT_PANEL_WIDTH : 0)}px) / 2)` } : undefined}
+          className={`fixed bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-3 px-4 py-2 rounded-full shadow-xl transition-all duration-500 z-50 border border-white/5 ${timeLeft < 10 ? 'bg-red-600 animate-pulse scale-105' : 'bg-slate-900 shadow-red-500/10'}`}>
           <div className="flex items-center gap-1.5">
             <span className="material-symbols-rounded text-red-500 text-lg">alarm</span>
             <span className="text-white font-black text-lg tabular-nums tracking-tighter">{timeLeft}s</span>
