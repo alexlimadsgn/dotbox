@@ -748,11 +748,6 @@ const App: React.FC = () => {
                   <div className="text-[10px] uppercase font-black tracking-widest" style={{ color: p.color }}>A jogar</div>
                 </motion.div>
                 <motion.div layout="position" className="text-3xl font-black text-slate-800 dark:text-white leading-none">{p.score}</motion.div>
-                {!winner && (
-                  <div className="absolute bottom-0 left-3 right-3 h-1 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
-                    <div className="h-full bg-red-500 transition-all duration-1000 linear" style={{ width: `${(timeLeft / startDelay) * 100}%` }} />
-                  </div>
-                )}
               </motion.div>
             ))}
             {playersWithScores.map((p, idx) => idx === currentPlayerIdx ? null : (
@@ -814,15 +809,6 @@ const App: React.FC = () => {
                 {playerLabel(p, p.id)}
               </motion.div>
               <motion.div layout="position" className="text-2xl font-black text-slate-800 dark:text-white leading-none">{p.score}</motion.div>
-              {/* Registro visual do tempo no card do jogador atual */}
-              {!winner && (
-                <div className="absolute bottom-0 left-3 right-3 h-1 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-red-500 transition-all duration-1000 linear"
-                    style={{ width: `${(timeLeft / startDelay) * 100}%` }}
-                  />
-                </div>
-              )}
             </motion.div>
           ))}
 
